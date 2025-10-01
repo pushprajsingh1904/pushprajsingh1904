@@ -1,5 +1,4 @@
-## Hi there 👋
-
+![My Image](https://raw.githubusercontent.com/username/repo/main/myphoto.jpg)
 <!--
 **pushprajsingh1904/pushprajsingh1904** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
