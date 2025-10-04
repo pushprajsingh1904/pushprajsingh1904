@@ -1,0 +1,350 @@
+/*
+  8x8 skid-steer rover (ESP32) - AP web control + HC-SR04 obstacle avoidance + servo boot.
+  - Uses one PWM channel per motor (8 channels) and one separate channel for servo.
+  - Motors: each motor uses two IN pins on an L298N; PWM channel is attached dynamically
+    to the IN pin that must be driven, the opposite IN is set LOW for direction control.
+  - HC-SR04 echo MUST be level-shifted to 3.3V before connecting to ESP32.
+  - Power: Motors must use separate battery; common GND required.
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Arduino.h>
+
+// ---------- CONFIG ----------
+const char* ssid_ap = "RoverAP";
+const char* ap_password = "rover1234";
+
+// Motor pins mapping (motor index 0..7 -> {IN_A, IN_B})
+// Motor order used: L1,R1,L2,R2,L3,R3,L4,R4 (8 motors)
+const uint8_t motorPins[8][2] = {
+  {2, 4},    // Motor 0 (L1)
+  {5, 12},   // Motor 1 (R1)
+  {13, 14},  // Motor 2 (L2)
+  {15, 16},  // Motor 3 (R2)
+  {17, 18},  // Motor 4 (L3)
+  {19, 21},  // Motor 5 (R3)
+  {22, 23},  // Motor 6 (L4)
+  {25, 26}   // Motor 7 (R4)
+};
+
+// Assign one PWM channel per motor (channels 0..7)
+const uint8_t motorPwmChannel[8] = {0,1,2,3,4,5,6,7};
+const int motorPwmFreq = 2000;     // 2 kHz for motor PWM
+const int motorPwmRes  = 8;        // 8-bit resolution (0-255)
+
+// Servo (boot) - use a dedicated LEDC channel at 50Hz with high resolution
+const uint8_t servoPin = 27;
+const uint8_t SERVO_CH = 8;        // LEDC channel for servo
+const uint32_t SERVO_FREQ = 50;    // 50 Hz
+const uint8_t SERVO_RES_BITS = 16; // 16-bit resolution for accurate pulse width
+// Typical servo pulse range (µs)
+const uint32_t SERVO_MIN_US = 500;   // 0° pulse width (adjust if needed)
+const uint32_t SERVO_MAX_US = 2500;  // 180° pulse width
+const uint32_t SERVO_PERIOD_US = 20000UL; // 20 ms period @ 50Hz
+
+// HC-SR04 pins (echo MUST be level shifted to 3.3V)
+const int trigPin = 32;
+const int echoPin = 33; // INPUT (use voltage divider/level shifter for echo)
+const float STOP_DISTANCE_CM = 25.0; // obstacle threshold
+const unsigned long ECHO_TIMEOUT = 30000UL; // microseconds
+
+// Autonomous config
+unsigned long TURN_MS_45 = 500; // approximate; *calibrate* for your robot
+int defaultSpeed = 200;         // 0-255 PWM
+
+volatile bool autoMode = false;
+
+WebServer server(80);
+
+// precomputed servo duty mapping
+uint32_t servoMaxDuty = 0;
+uint32_t servoMinDuty = 0;
+
+// ---------- Helper functions ----------
+
+// Setup PWM channels: one channel per motor and one for servo
+void pwmSetupChannels() {
+  // motor channels
+  for (uint8_t i = 0; i < 8; ++i) {
+    uint8_t ch = motorPwmChannel[i];
+    ledcSetup(ch, motorPwmFreq, motorPwmRes);
+    // Attach channel to the IN_A pin initially (we will reattach dynamically when needed)
+    ledcAttachPin(motorPins[i][0], ch);
+    // Ensure pins are outputs and low initially
+    pinMode(motorPins[i][0], OUTPUT);
+    pinMode(motorPins[i][1], OUTPUT);
+    digitalWrite(motorPins[i][0], LOW);
+    digitalWrite(motorPins[i][1], LOW);
+    ledcWrite(ch, 0);
+  }
+
+  // servo channel
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES_BITS);
+  pinMode(servoPin, OUTPUT);
+  ledcAttachPin(servoPin, SERVO_CH);
+
+  // compute servo duty range (16-bit)
+  uint32_t maxVal = (1UL << SERVO_RES_BITS) - 1UL;
+  servoMinDuty = (SERVO_MIN_US * maxVal) / SERVO_PERIOD_US;
+  servoMaxDuty = (SERVO_MAX_US * maxVal) / SERVO_PERIOD_US;
+}
+
+// set a servo angle 0..180 using LEDC (non-blocking)
+void servoWriteAngle(int angle) {
+  if (angle < 0) angle = 0;
+  if (angle > 180) angle = 180;
+  // linear map angle->duty
+  uint32_t duty = servoMinDuty + ( (uint32_t)angle * (servoMaxDuty - servoMinDuty) ) / 180U;
+  ledcWrite(SERVO_CH, duty);
+}
+
+// Motor control: dir 1=forward, -1=backward, 0=stop
+// This function attaches the motor's PWM channel to the correct IN pin dynamically.
+void setMotor(int mIndex, int dir, int speed) {
+  if (mIndex < 0 || mIndex >= 8) return;
+  uint8_t pinA = motorPins[mIndex][0];
+  uint8_t pinB = motorPins[mIndex][1];
+  uint8_t ch = motorPwmChannel[mIndex];
+
+  // ensure outputs
+  pinMode(pinA, OUTPUT);
+  pinMode(pinB, OUTPUT);
+
+  if (dir == 1) {
+    // forward: attach PWM to pinA, ensure pinB LOW
+    ledcAttachPin(pinA, ch);
+    digitalWrite(pinB, LOW);
+    ledcWrite(ch, speed); // 0..255
+  } else if (dir == -1) {
+    // backward: attach PWM to pinB, ensure pinA LOW
+    ledcAttachPin(pinB, ch);
+    digitalWrite(pinA, LOW);
+    ledcWrite(ch, speed); // 0..255
+  } else {
+    // stop
+    ledcWrite(ch, 0);
+    digitalWrite(pinA, LOW);
+    digitalWrite(pinB, LOW);
+  }
+}
+
+// set all motors to same dir/speed
+void setAllMotors(int dir, int speed) {
+  for (int i = 0; i < 8; ++i) setMotor(i, dir, speed);
+}
+
+void stopAll() {
+  setAllMotors(0, 0);
+}
+
+void forwardCmd() {
+  setAllMotors(1, defaultSpeed);
+}
+
+void reverseCmd() {
+  setAllMotors(-1, defaultSpeed);
+}
+
+void skidLeftCmd() {
+  // left motors reverse, right motors forward -> in-place left turn
+  for (int i = 0; i < 8; ++i) {
+    if (i % 2 == 0) setMotor(i, -1, defaultSpeed); // left motors
+    else setMotor(i, 1, defaultSpeed);             // right motors
+  }
+}
+
+void skidRightCmd() {
+  for (int i = 0; i < 8; ++i) {
+    if (i % 2 == 0) setMotor(i, 1, defaultSpeed);  // left motors forward
+    else setMotor(i, -1, defaultSpeed);            // right motors backward
+  }
+}
+
+// HC-SR04 distance (cm). Returns -1.0 on error/no-echo
+float getDistanceCM() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, ECHO_TIMEOUT);
+  if (duration == 0) return -1.0;
+  float dist = (duration / 2.0) * 0.0343; // cm (speed of sound ≈ 343 m/s)
+  return dist;
+}
+
+void timedRotateRight(unsigned long ms) {
+  skidRightCmd();
+  delay(ms);
+  stopAll();
+}
+
+void timedRotateLeft(unsigned long ms) {
+  skidLeftCmd();
+  delay(ms);
+  stopAll();
+}
+
+void bootOpen() {
+  servoWriteAngle(90); // open ~90°
+}
+
+void bootClose() {
+  servoWriteAngle(0);  // closed
+}
+
+// ---------- Web server ----------
+String pageHtml() {
+  String s = R"rawliteral(
+<!doctype html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Rover Control</title>
+<style>
+body{font-family:Arial;text-align:center;margin:10px}
+button{padding:18px 24px;margin:6px;font-size:18px}
+#dist{font-weight:bold}
+</style>
+</head>
+<body>
+<h2>Rover Control</h2>
+<div>
+  <button onclick="cmd('forward')">Forward</button><br/>
+  <button onclick="cmd('left')">Left</button>
+  <button onclick="cmd('stop')">Stop</button>
+  <button onclick="cmd('right')">Right</button><br/>
+  <button onclick="cmd('reverse')">Reverse</button>
+</div>
+<div style="margin-top:12px;">
+  <button onclick="cmd('bootopen')">Open Boot</button>
+  <button onclick="cmd('bootclose')">Close Boot</button>
+</div>
+<div style="margin-top:12px;">
+  <button onclick="cmd('autotoggle')">Toggle Auto Mode</button>
+  <p>Auto mode: <span id="automode">OFF</span></p>
+</div>
+<p>Front distance: <span id="dist">--</span> cm</p>
+<script>
+function cmd(c){
+  fetch('/cmd?c='+c).then(r=>r.text()).then(t=>console.log(t));
+}
+setInterval(()=>{
+  fetch('/status').then(r=>r.json()).then(j=>{
+    document.getElementById('dist').innerText = j.distance.toFixed(1);
+    document.getElementById('automode').innerText = j.auto ? 'ON' : 'OFF';
+  });
+}, 700);
+</script>
+</body>
+</html>
+)rawliteral";
+  return s;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", pageHtml());
+}
+
+void handleStatus() {
+  float d = getDistanceCM();
+  if (d < 0) d = 9999.0;
+  String json = String("{\"distance\":") + d + String(",\"auto\":") + (autoMode ? "true" : "false") + String("}");
+  server.send(200, "application/json", json);
+}
+
+void handleCmd() {
+  if (!server.hasArg("c")) { server.send(400, "text/plain", "Bad"); return; }
+  String c = server.arg("c");
+
+  if (c=="forward") { forwardCmd(); server.send(200,"text/plain","OK"); return; }
+  if (c=="reverse") { reverseCmd(); server.send(200,"text/plain","OK"); return; }
+  if (c=="left") { skidLeftCmd(); server.send(200,"text/plain","OK"); return; }
+  if (c=="right") { skidRightCmd(); server.send(200,"text/plain","OK"); return; }
+  if (c=="stop") { stopAll(); server.send(200,"text/plain","OK"); return; }
+  if (c=="bootopen") { bootOpen(); server.send(200,"text/plain","OK"); return; }
+  if (c=="bootclose") { bootClose(); server.send(200,"text/plain","OK"); return; }
+  if (c=="autotoggle") { autoMode = !autoMode; server.send(200,"text/plain", autoMode ? "AUTO ON" : "AUTO OFF"); return; }
+
+  server.send(400,"text/plain","Unknown");
+}
+
+// ---------- Autonomous behavior ----------
+void autonomousStep() {
+  float d = getDistanceCM();
+  if (d > 0 && d <= STOP_DISTANCE_CM) {
+    stopAll();
+    delay(100);
+
+    // rotate right ~45
+    timedRotateRight(TURN_MS_45);
+    delay(100);
+    float dR = getDistanceCM();
+    if (dR > 0 && dR > STOP_DISTANCE_CM) {
+      forwardCmd();
+      return;
+    }
+
+    // rotate back to center
+    timedRotateLeft(TURN_MS_45);
+
+    // rotate left ~45
+    timedRotateLeft(TURN_MS_45);
+    delay(100);
+    float dL = getDistanceCM();
+    if (dL > 0 && dL > STOP_DISTANCE_CM) {
+      forwardCmd();
+      return;
+    }
+
+    // neither side clear -> rotate ~180 and try reverse briefly
+    timedRotateRight(2 * TURN_MS_45);
+    reverseCmd();
+    delay(500);
+    stopAll();
+    delay(200);
+  } else {
+    forwardCmd();
+  }
+}
+
+// ---------- Setup/Loop ----------
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println(F("Rover booting..."));
+
+  // pins init
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  pwmSetupChannels();
+  bootClose();
+
+  // Start WiFi AP
+  WiFi.softAP(ssid_ap, ap_password);
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP); // usually 192.168.4.1
+
+  // Web server endpoints
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/cmd", handleCmd);
+  server.begin();
+
+  Serial.println(F("Ready. Connect to the RoverAP Wi-Fi and open http://192.168.4.1"));
+}
+
+unsigned long lastAutoCheck = 0;
+void loop() {
+  server.handleClient();
+  if (autoMode) {
+    unsigned long now = millis();
+    if (now - lastAutoCheck > 200) {
+      autonomousStep();
+      lastAutoCheck = now;
+    }
+  }
+}
