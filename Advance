@@ -108,19 +108,20 @@ int getDistance() {
 // === Web Page ===
 String htmlPage() {
   String page = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
-  page += "<style>button{width:150px;height:80px;font-size:24px;margin:10px;} </style></head><body>";
+  page += "<style>button{width:150px;height:80px;font-size:24px;margin:10px;user-select:none;-webkit-user-select:none;-ms-user-select:none;-moz-user-select:none;-webkit-tap-highlight-color:transparent;} button:active{background-color:#4CAF50;color:white;}</style>";
+  page += "</head><body>";
   page += "<h2>ESP32 8x8 Rover</h2>";
 
   // Manual buttons
-  page += "<button onmousedown=\"sendCmd('forward')\" onmouseup=\"sendCmd('stop')\">Forward</button><br>";
-  page += "<button onmousedown=\"sendCmd('left')\" onmouseup=\"sendCmd('stop')\">Left</button>";
-  page += "<button onmousedown=\"sendCmd('right')\" onmouseup=\"sendCmd('stop')\">Right</button><br>";
-  page += "<button onmousedown=\"sendCmd('backward')\" onmouseup=\"sendCmd('stop')\">Backward</button><br>";
+  page += "<button onmousedown=\"sendCmd('forward')\" onmouseup=\"sendCmd('stop')\" ontouchstart=\"sendCmd('forward')\" ontouchend=\"sendCmd('stop')\">Forward</button><br>";
+  page += "<button onmousedown=\"sendCmd('left')\" onmouseup=\"sendCmd('stop')\" ontouchstart=\"sendCmd('left')\" ontouchend=\"sendCmd('stop')\">Left</button>";
+  page += "<button onmousedown=\"sendCmd('right')\" onmouseup=\"sendCmd('stop')\" ontouchstart=\"sendCmd('right')\" ontouchend=\"sendCmd('stop')\">Right</button><br>";
+  page += "<button onmousedown=\"sendCmd('backward')\" onmouseup=\"sendCmd('stop')\" ontouchstart=\"sendCmd('backward')\" ontouchend=\"sendCmd('stop')\">Backward</button><br>";
 
   // Boot button
   page += "<button onclick=\"sendCmd('boot')\">Boot</button><br>";
 
-  // Auto mode button
+  // Auto mode toggle
   page += "<button onclick=\"sendCmd('auto')\">Toggle Auto Mode</button>";
 
   page += "<script>";
@@ -181,7 +182,6 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // Auto mode
   if(autoMode) {
     forward();
     int dist = getDistance();
@@ -194,7 +194,6 @@ void loop() {
     }
   }
   else {
-    // Manual mode
     if(currentAction=="forward") forward();
     else if(currentAction=="backward") backward();
     else if(currentAction=="left") left();
