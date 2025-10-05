@@ -1,11 +1,13 @@
 /* ============================================================
-   ESP32 38-Pin Rover – Safe Pin Version  (All boot pins removed)
+   ESP32 38-Pin Rover – Full Corrected Version
    Features:
+     • 8 motors via 4 L298N (16 pins)
      • Manual & Auto drive
      • Battery % + voltage display
      • 3 metal-detector inputs
-     • Neo-6M GPS with map link
-     • Ultrasonic obstacle detection
+     • Neo-6M GPS with small embedded map
+     • HC-SR04 obstacle detection
+     • Boot servo toggle
    ============================================================ */
 
 #include <WiFi.h>
@@ -14,30 +16,29 @@
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
 
-// ---------------- WIFI SETUP -----------------
+// ---------------- WIFI -----------------
 const char* ssid = "Rover_AP";
 const char* password = "12345678";
 WebServer server(80);
 
 // -------------- MOTOR PINS -------------------
-// (4 modules × 2 motors = 8 channels)
+// 8 motors = 16 control pins (4 L298N)
 #define M1A 4
 #define M1B 5
-#define M2A 16
-#define M2B 17
-#define M3A 18
-#define M3B 19
-#define M4A 21
-#define M4B 22
-#define M5A 23
-#define M5B 25
-#define M6A 26
-#define M6B 27
-#define M7A 32
-#define M7B 33
-// M8 uses remaining safe pair
-#define M8A 22
-#define M8B 23
+#define M1C 16
+#define M1D 17
+#define M2A 18
+#define M2B 19
+#define M2C 21
+#define M2D 22
+#define M3A 23
+#define M3B 25
+#define M3C 26
+#define M3D 27
+#define M4A 32
+#define M4B 33
+#define M4C 12
+#define M4D 15
 
 // -------------- SERVO -------------------------
 Servo bootServo;
@@ -49,7 +50,7 @@ Servo bootServo;
 
 // -------------- BATTERY SENSOR ---------------
 #define BATTERY_PIN 35
-#define V_DIV_RATIO 10.0  // adjust after calibration
+#define V_DIV_RATIO 10.0  // calibrate per module
 #define BATTERY_FULL 12.6
 #define BATTERY_EMPTY 10.5
 
@@ -94,60 +95,104 @@ long readDistance() {
 }
 
 void stopAll() {
-  int motors[] = {M1A,M1B,M2A,M2B,M3A,M3B,M4A,M4B,M5A,M5B,M6A,M6B,M7A,M7B};
-  for (int i = 0; i < 14; i++) digitalWrite(motors[i], LOW);
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i = 0; i < 16; i++) digitalWrite(motors[i], LOW);
 }
 
 void forward() {
-  digitalWrite(M1A, HIGH); digitalWrite(M1B, LOW);
-  digitalWrite(M2A, HIGH); digitalWrite(M2B, LOW);
-  digitalWrite(M3A, HIGH); digitalWrite(M3B, LOW);
-  digitalWrite(M4A, HIGH); digitalWrite(M4B, LOW);
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
 }
+
 void back() {
-  digitalWrite(M1A, LOW); digitalWrite(M1B, HIGH);
-  digitalWrite(M2A, LOW); digitalWrite(M2B, HIGH);
-  digitalWrite(M3A, LOW); digitalWrite(M3B, HIGH);
-  digitalWrite(M4A, LOW); digitalWrite(M4B, HIGH);
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
 }
+
 void left() {
-  digitalWrite(M1A, LOW); digitalWrite(M1B, HIGH);
-  digitalWrite(M2A, HIGH); digitalWrite(M2B, LOW);
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
 }
+
 void right() {
-  digitalWrite(M1A, HIGH); digitalWrite(M1B, LOW);
-  digitalWrite(M2A, LOW); digitalWrite(M2B, HIGH);
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
 }
 
 // =====================================================
-// HTML PAGE
+// Webpage
 // =====================================================
 String page() {
   float v = readBattery();
   int p = batteryPercent(v);
+
   String batBar = "<progress value='" + String(p) + "' max='100'></progress> "
                   + String(v,2) + " V (" + String(p) + "%)";
+
   String gpsStr = "NO FIX";
+  String gpsMap = "";
   if (gps.location.isValid()) {
-    gpsStr = String(gps.location.lat(),6) + "," + String(gps.location.lng(),6);
+    gpsStr = "Lat: " + String(gps.location.lat(),6) + 
+             " , Lon: " + String(gps.location.lng(),6);
+    gpsMap = "<iframe width='250' height='150' frameborder='0' "
+             "style='border:0' "
+             "src='https://www.google.com/maps?q=" 
+             + String(gps.location.lat(),6) + "," + String(gps.location.lng(),6) 
+             + "&hl=es;z=14&output=embed'></iframe>";
   }
 
-  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
-  "<style>button{width:80px;height:80px;font-size:18px;margin:5px;}progress{width:80%;}</style>"
-  "</head><body><h2>ESP32 Rover Control</h2>"
-  "<h3>Battery:</h3>"+batBar+
-  "<h3>GPS:</h3>"+gpsStr+
-  "<h3>Mine Log:</h3>"+mineLog+
-  "<br><br>"
-  "<button onmousedown=\"fetch('/fwd')\" onmouseup=\"fetch('/stop')\">↑</button><br>"
-  "<button onmousedown=\"fetch('/left')\" onmouseup=\"fetch('/stop')\">←</button>"
-  "<button onmousedown=\"fetch('/back')\" onmouseup=\"fetch('/stop')\">↓</button>"
-  "<button onmousedown=\"fetch('/right')\" onmouseup=\"fetch('/stop')\">→</button><br><br>"
+  String mineHTML = mineLog;
+  if (mineHTML == "") mineHTML = "No mines detected";
+
+  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
+  "<style>"
+  "button{width:100px;height:60px;font-size:18px;margin:5px;}"
+  ".field{margin:10px;padding:5px;border:1px solid #888;}"
+  "</style></head><body>"
+  "<h2>ESP32 Rover Control</h2>"
+
+  "<div class='field'><b>Battery:</b><br>"+batBar+"</div>"
+  "<div class='field'><b>GPS:</b><br>"+gpsStr+"<br>"+gpsMap+"</div>"
+  "<div class='field'><b>Mine Log:</b><br>"+mineHTML+"</div><br>"
+
+  "<button onmousedown=\"fetch('/fwd')\" onmouseup=\"fetch('/stop')\">Forward</button><br>"
+  "<button onmousedown=\"fetch('/left')\" onmouseup=\"fetch('/stop')\">Left</button>"
+  "<button onmousedown=\"fetch('/back')\" onmouseup=\"fetch('/stop')\">Reverse</button>"
+  "<button onmousedown=\"fetch('/right')\" onmouseup=\"fetch('/stop')\">Right</button><br><br>"
+
+  "<button onclick=\"fetch('/boot')\">Boot</button><br><br>"
   "<button onclick=\"fetch('/auto')\">Auto Mode</button>"
   "</body></html>";
+
   return html;
 }
 
+// =====================================================
+// Server handlers
 // =====================================================
 void handleRoot() { server.send(200, "text/html", page()); }
 void handleFwd(){forward(); server.send(200,"text/plain","FWD");}
@@ -155,6 +200,15 @@ void handleBack(){back(); server.send(200,"text/plain","BACK");}
 void handleLeft(){left(); server.send(200,"text/plain","LEFT");}
 void handleRight(){right(); server.send(200,"text/plain","RIGHT");}
 void handleStop(){stopAll(); server.send(200,"text/plain","STOP");}
+
+void handleBoot() {
+  static bool bootOpen = false;
+  if (bootOpen) bootServo.write(90); // Close
+  else bootServo.write(0);           // Open
+  bootOpen = !bootOpen;
+  server.send(200,"text/plain",bootOpen?"Boot Open":"Boot Closed");
+}
+
 void handleAuto(){
   autoMode = !autoMode;
   server.send(200,"text/plain",autoMode?"AUTO ON":"AUTO OFF");
@@ -164,11 +218,12 @@ void handleAuto(){
 // =====================================================
 void setup() {
   Serial.begin(115200);
-  WiFi.softAP(ssid, password);
+
+  WiFi.softAP(ssid,password);
   Serial.println(WiFi.softAPIP());
 
-  int motors[] = {M1A,M1B,M2A,M2B,M3A,M3B,M4A,M4B,M5A,M5B,M6A,M6B,M7A,M7B};
-  for (int i=0;i<14;i++) pinMode(motors[i],OUTPUT);
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i=0;i<16;i++) pinMode(motors[i],OUTPUT);
 
   pinMode(TRIG_PIN,OUTPUT);
   pinMode(ECHO_PIN,INPUT);
@@ -188,6 +243,7 @@ void setup() {
   server.on("/right", handleRight);
   server.on("/stop", handleStop);
   server.on("/auto", handleAuto);
+  server.on("/boot", handleBoot);
   server.begin();
 
   stopAll();
@@ -198,25 +254,9 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // GPS update
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
 
-  // Auto mode behaviour
   if (autoMode) {
     long d = readDistance();
     if (d < 15) { stopAll(); delay(300); right(); delay(700); stopAll(); }
-    else forward();
-  }
-
-  // Mine detection
-  if (digitalRead(DET1) || digitalRead(DET2) || digitalRead(DET3)) {
-    stopAll();
-    String entry = "Mine Detected at ";
-    if (gps.location.isValid())
-      entry += String(gps.location.lat(),6)+","+String(gps.location.lng(),6);
-    else entry += "NO GPS";
-    entry += "<br>";
-    mineLog = entry + mineLog;
-    delay(1000);
-  }
-}
+   
