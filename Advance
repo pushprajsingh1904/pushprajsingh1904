@@ -8,6 +8,7 @@
      • Neo-6M GPS with small embedded map
      • HC-SR04 obstacle detection
      • Boot servo toggle
+     • Webpage buttons: press-and-hold, no text highlight
    ============================================================ */
 
 #include <WiFi.h>
@@ -169,7 +170,9 @@ String page() {
 
   String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
   "<style>"
-  "button{width:100px;height:60px;font-size:18px;margin:5px;}"
+  "button{width:100px;height:60px;font-size:18px;margin:5px;"
+  "user-select:none;-webkit-user-select:none;-ms-user-select:none;"
+  "-webkit-tap-highlight-color:transparent;outline:none;}"
   ".field{margin:10px;padding:5px;border:1px solid #888;}"
   "</style></head><body>"
   "<h2>ESP32 Rover Control</h2>"
@@ -252,31 +255,19 @@ void setup() {
 // =====================================================
 void loop() {
   server.handleClient();
-
   while (gpsSerial.available()) gps.encode(gpsSerial.read());
 
-  // Auto mode logic
+  // Auto mode
   if (autoMode) {
     long d = readDistance();
-    if (d < 15) { 
-      stopAll(); 
-      delay(300); 
-      right(); 
-      delay(700); 
-      stopAll(); 
-    } else {
-      forward();
-      delay(2000);  // move forward 2 sec
-      stopAll();
-    }
+    if (d < 15) { stopAll(); delay(300); right(); delay(700); stopAll(); }
+    else { forward(); delay(2000); stopAll(); }
 
-    // Check metal detectors in auto mode
     if (digitalRead(DET1)==HIGH || digitalRead(DET2)==HIGH || digitalRead(DET3)==HIGH) {
       stopAll();
-      String loc = gps.location.isValid() ? 
-        " Lat:"+String(gps.location.lat(),6)+" Lon:"+String(gps.location.lng(),6) : " No GPS";
+      String loc = gps.location.isValid() ? " Lat:"+String(gps.location.lat(),6)+" Lon:"+String(gps.location.lng(),6) : " No GPS";
       mineLog += "<br>Mine Detected!"+loc;
-      delay(500); // small pause after mine detection
+      delay(500);
     }
   }
 }
