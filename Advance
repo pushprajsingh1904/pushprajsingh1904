@@ -68,7 +68,6 @@ TinyGPSPlus gps;
 // -------------- VARIABLES --------------------
 bool autoMode = false;
 String mineLog = "";
-unsigned long lastMove = 0;
 
 // =====================================================
 // Helper functions
@@ -221,42 +220,3 @@ void setup() {
 
   WiFi.softAP(ssid,password);
   Serial.println(WiFi.softAPIP());
-
-  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
-  for (int i=0;i<16;i++) pinMode(motors[i],OUTPUT);
-
-  pinMode(TRIG_PIN,OUTPUT);
-  pinMode(ECHO_PIN,INPUT);
-  pinMode(DET1,INPUT);
-  pinMode(DET2,INPUT);
-  pinMode(DET3,INPUT);
-
-  bootServo.attach(SERVO_PIN);
-  bootServo.write(90);
-
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, -1);
-
-  server.on("/", handleRoot);
-  server.on("/fwd", handleFwd);
-  server.on("/back", handleBack);
-  server.on("/left", handleLeft);
-  server.on("/right", handleRight);
-  server.on("/stop", handleStop);
-  server.on("/auto", handleAuto);
-  server.on("/boot", handleBoot);
-  server.begin();
-
-  stopAll();
-  Serial.println("Rover Ready.");
-}
-
-// =====================================================
-void loop() {
-  server.handleClient();
-
-  while (gpsSerial.available()) gps.encode(gpsSerial.read());
-
-  if (autoMode) {
-    long d = readDistance();
-    if (d < 15) { stopAll(); delay(300); right(); delay(700); stopAll(); }
-   
