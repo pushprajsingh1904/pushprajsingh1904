@@ -1,14 +1,6 @@
 /* ============================================================
    ESP32 38-Pin Rover – Full Corrected Version
-   Features:
-     • 8 motors via 4 L298N (16 pins)
-     • Manual & Auto drive
-     • Battery % + voltage display
-     • 3 metal-detector inputs
-     • Neo-6M GPS with small embedded map
-     • HC-SR04 obstacle detection
-     • Boot servo toggle
-     • Webpage buttons: press-and-hold, no text highlight
+   Added: Obstacle distance display on webpage
    ============================================================ */
 
 #include <WiFi.h>
@@ -23,7 +15,6 @@ const char* password = "12345678";
 WebServer server(80);
 
 // -------------- MOTOR PINS -------------------
-// 8 motors = 16 control pins (4 L298N)
 #define M1A 4
 #define M1B 5
 #define M1C 16
@@ -51,7 +42,7 @@ Servo bootServo;
 
 // -------------- BATTERY SENSOR ---------------
 #define BATTERY_PIN 35
-#define V_DIV_RATIO 10.0  // calibrate per module
+#define V_DIV_RATIO 10.0
 #define BATTERY_FULL 12.6
 #define BATTERY_EMPTY 10.5
 
@@ -62,13 +53,14 @@ Servo bootServo;
 
 // -------------- GPS --------------------------
 HardwareSerial gpsSerial(1);
-#define GPS_RX 4    // GPS TX -> ESP32 RX (GPIO4)
+#define GPS_RX 4
 #define GPS_BAUD 9600
 TinyGPSPlus gps;
 
 // -------------- VARIABLES --------------------
 bool autoMode = false;
 String mineLog = "";
+long obstacleDistance = 0;
 
 // =====================================================
 // Helper functions
@@ -150,6 +142,8 @@ String page() {
   float v = readBattery();
   int p = batteryPercent(v);
 
+  obstacleDistance = readDistance();
+
   String batBar = "<progress value='" + String(p) + "' max='100'></progress> "
                   + String(v,2) + " V (" + String(p) + "%)";
 
@@ -178,6 +172,7 @@ String page() {
   "<h2>ESP32 Rover Control</h2>"
 
   "<div class='field'><b>Battery:</b><br>"+batBar+"</div>"
+  "<div class='field'><b>Obstacle Distance:</b><br>"+String(obstacleDistance)+" cm</div>"
   "<div class='field'><b>GPS:</b><br>"+gpsStr+"<br>"+gpsMap+"</div>"
   "<div class='field'><b>Mine Log:</b><br>"+mineHTML+"</div><br>"
 
