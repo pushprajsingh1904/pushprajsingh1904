@@ -1,0 +1,287 @@
+/* ============================================================
+   ESP32 38-Pin Rover – Full Corrected Version with Live Telemetry
+   ============================================================ */
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+
+// ---------------- WIFI -----------------
+const char* ssid = "Rover_AP";
+const char* password = "12345678";
+WebServer server(80);
+
+// -------------- MOTOR PINS -------------------
+#define M1A 4
+#define M1B 5
+#define M1C 16
+#define M1D 17
+#define M2A 18
+#define M2B 19
+#define M2C 21
+#define M2D 22
+#define M3A 23
+#define M3B 25
+#define M3C 26
+#define M3D 27
+#define M4A 32
+#define M4B 33
+#define M4C 12
+#define M4D 15
+
+// -------------- SERVO -------------------------
+Servo bootServo;
+#define SERVO_PIN 13
+
+// -------------- ULTRASONIC --------------------
+#define TRIG_PIN 14
+#define ECHO_PIN 34
+
+// -------------- BATTERY SENSOR ---------------
+#define BATTERY_PIN 35
+#define V_DIV_RATIO 10.0
+#define BATTERY_FULL 12.6
+#define BATTERY_EMPTY 10.5
+
+// -------------- METAL DETECTORS --------------
+#define DET1 36
+#define DET2 38
+#define DET3 39
+
+// -------------- GPS --------------------------
+HardwareSerial gpsSerial(1);
+#define GPS_RX 4
+#define GPS_BAUD 9600
+TinyGPSPlus gps;
+
+// -------------- VARIABLES --------------------
+bool autoMode = false;
+String mineLog = "";
+long obstacleDistance = 0;
+
+// =====================================================
+// Helper functions
+// =====================================================
+float readBattery() {
+  int adc = analogRead(BATTERY_PIN);
+  float v = (adc / 4095.0) * 3.3 * V_DIV_RATIO;
+  return v;
+}
+
+int batteryPercent(float v) {
+  if (v >= BATTERY_FULL) return 100;
+  if (v <= BATTERY_EMPTY) return 0;
+  return (int)((v - BATTERY_EMPTY) / (BATTERY_FULL - BATTERY_EMPTY) * 100);
+}
+
+long readDistance() {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  long dist = duration * 0.034 / 2;
+  return dist;
+}
+
+void stopAll() {
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i = 0; i < 16; i++) digitalWrite(motors[i], LOW);
+}
+
+void forward() {
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
+}
+
+void back() {
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
+}
+
+void left() {
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
+}
+
+void right() {
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
+}
+
+// =====================================================
+// Webpage
+// =====================================================
+String page() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<style>
+button{width:100px;height:60px;font-size:18px;margin:5px;
+user-select:none;-webkit-user-select:none;-ms-user-select:none;
+-webkit-tap-highlight-color:transparent;outline:none;}
+.field{margin:10px;padding:5px;border:1px solid #888;}
+#autoBtn,#bootBtn{background-color:#ccc;}
+</style>
+</head>
+<body>
+<h2>ESP32 Rover Control</h2>
+
+<div class='field'><b>Battery:</b><br><span id='battery'>Loading...</span></div>
+<div class='field'><b>Obstacle Distance:</b><br><span id='distance'>Loading...</span> cm</div>
+<div class='field'><b>GPS:</b><br><span id='gps'>Loading...</span></div>
+<div class='field'><b>Mine Log:</b><br><span id='minelog'>Loading...</span></div><br>
+
+<button onmousedown="fetch('/fwd')" onmouseup="fetch('/stop')">Forward</button><br>
+<button onmousedown="fetch('/left')" onmouseup="fetch('/stop')">Left</button>
+<button onmousedown="fetch('/back')" onmouseup="fetch('/stop')">Reverse</button>
+<button onmousedown="fetch('/right')" onmouseup="fetch('/stop')">Right</button><br><br>
+
+<button id='bootBtn' onclick="fetch('/boot').then(()=>updateTelemetry())">Boot</button><br><br>
+<button id='autoBtn' onclick="fetch('/auto').then(()=>updateTelemetry())">Auto Mode</button>
+
+<script>
+function updateTelemetry() {
+  fetch('/telemetry').then(r=>r.json()).then(data=>{
+    document.getElementById('battery').innerText=data.battery;
+    document.getElementById('distance').innerText=data.distance;
+    document.getElementById('gps').innerText=data.gps;
+    document.getElementById('minelog').innerHTML=data.minelog;
+    // Change button colors for active modes
+    document.getElementById('autoBtn').style.backgroundColor=data.autoMode?'green':'#ccc';
+    document.getElementById('bootBtn').style.backgroundColor=data.bootOpen?'green':'#ccc';
+  });
+}
+setInterval(updateTelemetry,500); // fetch every 500ms
+updateTelemetry();
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+  return html;
+}
+
+// =====================================================
+// Server handlers
+// =====================================================
+void handleRoot() { server.send(200, "text/html", page()); }
+void handleFwd(){forward(); server.send(200,"text/plain","FWD");}
+void handleBack(){back(); server.send(200,"text/plain","BACK");}
+void handleLeft(){left(); server.send(200,"text/plain","LEFT");}
+void handleRight(){right(); server.send(200,"text/plain","RIGHT");}
+void handleStop(){stopAll(); server.send(200,"text/plain","STOP");}
+
+bool bootOpen = false;
+void handleBoot() {
+  bootOpen = !bootOpen;
+  bootServo.write(bootOpen?0:90); // 0=open, 90=close
+  server.send(200,"text/plain",bootOpen?"Boot Open":"Boot Closed");
+}
+
+void handleAuto(){
+  autoMode = !autoMode;
+  server.send(200,"text/plain",autoMode?"AUTO ON":"AUTO OFF");
+}
+
+void handleTelemetry(){
+  float v = readBattery();
+  int p = batteryPercent(v);
+  obstacleDistance = readDistance();
+  String gpsStr = "NO FIX";
+  if (gps.location.isValid()) gpsStr = "Lat:"+String(gps.location.lat(),6)+" Lon:"+String(gps.location.lng(),6);
+
+  String json = "{";
+  json += "\"battery\":\""+String(v,2)+"V ("+String(p)+"%)\"";
+  json += ",\"distance\":\""+String(obstacleDistance)+"\"";
+  json += ",\"gps\":\""+gpsStr+"\"";
+  json += ",\"minelog\":\""+mineLog+"\"";
+  json += ",\"autoMode\":"+String(autoMode?"true":"false");
+  json += ",\"bootOpen\":"+String(bootOpen?"true":"false");
+  json += "}";
+  server.send(200,"application/json",json);
+}
+
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.softAP(ssid,password);
+  Serial.println(WiFi.softAPIP());
+
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i=0;i<16;i++) pinMode(motors[i],OUTPUT);
+
+  pinMode(TRIG_PIN,OUTPUT);
+  pinMode(ECHO_PIN,INPUT);
+  pinMode(DET1,INPUT);
+  pinMode(DET2,INPUT);
+  pinMode(DET3,INPUT);
+
+  bootServo.attach(SERVO_PIN);
+  bootServo.write(90);
+
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, -1);
+
+  server.on("/", handleRoot);
+  server.on("/fwd", handleFwd);
+  server.on("/back", handleBack);
+  server.on("/left", handleLeft);
+  server.on("/right", handleRight);
+  server.on("/stop", handleStop);
+  server.on("/auto", handleAuto);
+  server.on("/boot", handleBoot);
+  server.on("/telemetry", handleTelemetry);
+  server.begin();
+
+  stopAll();
+  Serial.println("Rover Ready.");
+}
+
+// =====================================================
+void loop() {
+  server.handleClient();
+  while (gpsSerial.available()) gps.encode(gpsSerial.read());
+
+  // Auto mode
+  if (autoMode) {
+    long d = readDistance();
+    if (d < 15) { stopAll(); delay(300); right(); delay(700); stopAll(); }
+    else { forward(); delay(2000); stopAll(); }
+
+    if (digitalRead(DET1)==HIGH || digitalRead(DET2)==HIGH || digitalRead(DET3)==HIGH) {
+      stopAll();
+      String loc = gps.location.isValid() ? " Lat:"+String(gps.location.lat(),6)+" Lon:"+String(gps.location.lng(),6) : " No GPS";
+      mineLog += "<br>Mine Detected!"+loc;
+      delay(500);
+    }
+  }
+}
