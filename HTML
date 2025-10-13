@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ESP32 Rover Controller</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {
+    background-color: black;
+    color: lime;
+    font-family: monospace;
+    text-align: center;
+  }
+  h1 { color: #00ff7f; }
+  button {
+    background-color: #00aa00;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin: 5px;
+    border-radius: 4px;
+    font-size: 16px;
+  }
+  button:hover { background-color: #00cc00; }
+  #camFeed {
+    width: 90%;
+    max-width: 480px;
+    border: 2px solid #00ff00;
+    border-radius: 6px;
+    margin-top: 10px;
+  }
+  #sensorBox {
+    border: 1px solid #00ff00;
+    display: inline-block;
+    padding: 10px;
+    margin-top: 15px;
+    text-align: left;
+  }
+  .label {
+    color: #00ffff;
+    display: inline-block;
+    width: 100px;
+  }
+  .value {
+    color: #ffffff;
+    display: inline-block;
+    width: 120px;
+  }
+</style>
+</head>
+<body>
+<h1>ESP32 Rover Control</h1>
+
+<img id="camFeed" src="http://192.168.4.2:81/stream" alt="Camera Stream">
+
+<div>
+  <button onclick="sendCmd('forward')">Forward</button><br>
+  <button onclick="sendCmd('left')">Left</button>
+  <button onclick="sendCmd('stop')">Stop</button>
+  <button onclick="sendCmd('right')">Right</button><br>
+  <button onclick="sendCmd('backward')">Backward</button>
+</div>
+
+<div id="sensorBox">
+  <div><span class="label">Battery:</span> <span id="battery" class="value">--</span></div>
+  <div><span class="label">Mine:</span> <span id="mine" class="value">--</span></div>
+  <div><span class="label">GPS:</span> <span id="gps" class="value">--</span></div>
+  <div><span class="label">Distance:</span> <span id="distance" class="value">--</span></div>
+</div>
+
+<script>
+function sendCmd(cmd) {
+  fetch('/move?dir=' + cmd).then(r => console.log('Sent:', cmd));
+}
+
+// live sensor update every 2 s
+async function updateSensors() {
+  try {
+    const res = await fetch('/sensors');
+    const data = await res.json();
+    document.getElementById("battery").innerText  = data.voltage + " V";
+    document.getElementById("mine").innerText     = data.mine;
+    document.getElementById("gps").innerText      = data.gps;
+    document.getElementById("distance").innerText = data.distance + " m";
+  } catch(e) {
+    document.getElementById("battery").innerText  = "--";
+    document.getElementById("mine").innerText     = "--";
+    document.getElementById("gps").innerText      = "--";
+    document.getElementById("distance").innerText = "--";
+  }
+}
+setInterval(updateSensors, 2000);
+updateSensors();
+</script>
+</body>
+</html>
