@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ESP32 Rover Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {
+    background-color: #0d1117;
+    color: #e6edf3;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    margin: 0;
+    padding: 0;
+  }
+  h1 {
+    background-color: #161b22;
+    padding: 10px;
+    margin: 0;
+  }
+  #controls, #modeButtons {
+    margin-top: 20px;
+  }
+  button {
+    background-color: #238636;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin: 5px;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  button.active {
+    background-color: #1f6feb;
+  }
+  button:hover {
+    background-color: #2ea043;
+  }
+  #camFeed {
+    width: 90%;
+    max-width: 500px;
+    border: 2px solid #30363d;
+    border-radius: 8px;
+    margin-top: 20px;
+  }
+  #sensorContainer {
+    background-color: #161b22;
+    border-top: 1px solid #30363d;
+    margin-top: 20px;
+    padding: 15px;
+  }
+  #sensorData {
+    text-align: left;
+    display: inline-block;
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+<h1>ESP32 Rover Controller</h1>
+
+<!-- Camera Stream -->
+<img id="camFeed" src="http://192.168.4.2:81/stream" alt="Camera Stream">
+
+<!-- Movement Controls -->
+<div id="controls">
+  <button onclick="move('forward')">↑ Forward</button><br>
+  <button onclick="move('left')">← Left</button>
+  <button onclick="move('stop')">■ Stop</button>
+  <button onclick="move('right')">→ Right</button><br>
+  <button onclick="move('backward')">↓ Backward</button>
+</div>
+
+<!-- Mode Buttons -->
+<div id="modeButtons">
+  <button id="bootBtn" onclick="toggleMode('boot')">BOOT</button>
+  <button id="autoDriveBtn" onclick="toggleMode('autoDrive')">AUTO DRIVE</button>
+  <button id="autoCamBtn" onclick="toggleMode('autoCam')">AUTO CAM</button>
+</div>
+
+<!-- Battery / Sensor Info -->
+<div id="sensorContainer">
+  <h3>Battery / Sensor Info</h3>
+  <div id="sensorData"><p>Loading...</p></div>
+</div>
+
+<script>
+// ===== Movement Controls =====
+function move(direction) {
+  fetch('/move?dir=' + direction)
+    .then(response => console.log('Command sent:', direction))
+    .catch(err => console.error('Error:', err));
+}
+
+// ===== Mode Buttons =====
+function toggleMode(mode) {
+  const btn = document.getElementById(mode + 'Btn');
+  btn.classList.toggle('active');
+  const state = btn.classList.contains('active') ? 'on' : 'off';
+  fetch('/mode?name=' + mode + '&state=' + state)
+    .then(response => console.log(mode + ' -> ' + state))
+    .catch(err => console.error('Error:', err));
+}
+
+// ===== Auto Sensor Refresh =====
+async function updateSensors() {
+  try {
+    const response = await fetch("/sensors");
+    if (response.ok) {
+      const data = await response.json();
+      document.getElementById("sensorData").innerHTML = `
+        <p><b>Voltage:</b> ${data.voltage} V</p>
+        <p><b>Metal 1:</b> ${data.metal1}</p>
+        <p><b>Metal 2:</b> ${data.metal2}</p>
+        <p><b>Metal 3:</b> ${data.metal3}</p>
+      `;
+    } else {
+      document.getElementById("sensorData").innerHTML = `<p>Error fetching data</p>`;
+    }
+  } catch (err) {
+    document.getElementById("sensorData").innerHTML = `<p>Disconnected</p>`;
+  }
+}
+setInterval(updateSensors, 2000);
+updateSensors();
+
+// ===== TensorFlow Object Detection (Offline Ready) =====
+// These scripts must be uploaded to SPIFFS: /tf.min.js and /coco-ssd.min.js
+const script1 = document.createElement('script');
+script1.src = '/tf.min.js';
+document.head.appendChild(script1);
+const script2 = document.createElement('script');
+script2.src = '/coco-ssd.min.js';
+document.head.appendChild(script2);
+
+let model;
+let video = document.getElementById('camFeed');
+
+window.addEventListener('load', () => {
+  script2.onload = async () => {
+    model = await cocoSsd.load();
+    console.log("COCO-SSD model loaded.");
+    detectObjects();
+  };
+});
+
+async function detectObjects() {
+  if (model) {
+    try {
+      const predictions = await model.detect(video);
+      predictions.forEach(p => {
+        if (p.class === 'person') {
+          console.log("Person detected!");
+          // Example action: rotate turret or alert
+          fetch('/alert?target=person');
+        }
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  requestAnimationFrame(detectObjects);
+}
+</script>
+</body>
+</html>
