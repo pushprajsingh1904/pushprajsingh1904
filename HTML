@@ -1,88 +1,65 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 Rover Control</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ESP32 Rover — Live Tracking</title>
 <style>
-body {
-  font-family: Arial, sans-serif;
-  text-align: center;
-  background-color: #fff;
-  color: #000;
-}
-button {
-  width: 90px;
-  height: 45px;
-  margin: 3px;
-  font-size: 15px;
-  border-radius: 5px;
-  border: 1px solid #666;
-  cursor: pointer;
-}
-button.active {
-  background-color: green;
-  color: white;
-}
-#camFeed {
-  border: 2px solid #000;
-  border-radius: 6px;
-}
-.field {
-  margin: 10px;
-  padding: 10px;
-  border: 1px solid #888;
-  border-radius: 6px;
-  background-color: #f8f8f8;
-  display: inline-block;
-  text-align: left;
-}
-.field b {
-  display: block;
-  margin-bottom: 5px;
-}
-.infoLine {
-  margin: 3px 0;
-}
+body{font-family:Arial;text-align:center;background:#fff;color:#000;}
+h2{margin:8px 0;}
+.field{display:inline-block;background:#f8f8f8;border:1px solid #ccc;padding:10px;margin:8px;border-radius:6px;}
+button{width:90px;height:40px;margin:4px;border-radius:6px;border:1px solid #666;cursor:pointer;}
+button.active{background:green;color:#fff;}
+button:active{background:#ddd;}
+#videoWrap{position:relative;display:inline-block;}
+#camImg{border:2px solid #000;border-radius:6px;display:block;}
+#overlay{position:absolute;left:0;top:0;pointer-events:none;}
+.infoLine{margin:6px 0;text-align:left;}
+label{cursor:pointer;}
 </style>
 
-<!-- TensorFlow.js and COCO-SSD local offline -->
+<!-- Local TensorFlow.js + COCO-SSD (offline) -->
 <script src="tf.min.js"></script>
 <script src="coco-ssd.min.js"></script>
 </head>
-
 <body>
-<h2>ESP32 Rover & Turret</h2>
 
-<div class="field">
-  <b>Camera Feed:</b>
-  <video id="camFeed" width="320" height="240" autoplay muted></video>
+<h2>ESP32 Rover & Turret — Live Tracking</h2>
+
+<div class="field" id="videoField">
+  <b>Camera Feed</b><br>
+  <div id="videoWrap">
+    <img id="camImg" src="http://192.168.4.2:80/stream" width="480" height="360" alt="CAM stream">
+    <canvas id="overlay" width="480" height="360"></canvas>
+  </div><br>
+  <label><input type="checkbox" id="autoTrackToggle" checked> Auto-Tracking</label>
 </div>
 
 <div class="field">
-  <b>Rover Controls:</b><br>
-  <button onmousedown="fetch('/fwd')" onmouseup="fetch('/stop')">Forward</button>
-  <button onmousedown="fetch('/left')" onmouseup="fetch('/stop')">Left</button>
-  <button onmousedown="fetch('/back')" onmouseup="fetch('/stop')">Back</button>
-  <button onmousedown="fetch('/right')" onmouseup="fetch('/stop')">Right</button><br>
-  <button id="autoDriveBtn" onclick="toggleAuto('auto')">Auto Drive</button>
-  <button onclick="fetch('/boot')">Boot</button> <!-- NEW functional Boot button -->
+  <b>Rover Controls</b><br>
+  <button onclick="fetch(ROVER+'/fwd')">Forward</button><br>
+  <button onclick="fetch(ROVER+'/left')">Left</button>
+  <button onclick="fetch(ROVER+'/stop')">Stop</button>
+  <button onclick="fetch(ROVER+'/right')">Right</button><br>
+  <button onclick="fetch(ROVER+'/back')">Back</button><br><br>
+  <button id="bootBtn" onclick="fetch(ROVER+'/boot').then(()=>flashBtn('bootBtn'))">Boot</button>
+  <button id="autoDriveBtn" onclick="fetch(ROVER+'/auto').then(()=>flashBtn('autoDriveBtn'))">Auto Drive</button>
 </div>
 
 <div class="field">
-  <b>Turret Controls:</b><br>
-  <button onclick="fetch('/yawLeft')">Yaw Left</button>
-  <button onclick="fetch('/yawRight')">Yaw Right</button>
-  <button onclick="fetch('/yawStop')">Yaw Stop</button><br>
-  <button onclick="fetch('/pitchUp')">Pitch Up</button>
-  <button onclick="fetch('/pitchDown')">Pitch Down</button>
-  <button onclick="fetch('/pitchStop')">Pitch Stop</button><br>
-  <button id="autoCamBtn" onclick="toggleAuto('autoCam')">Auto Scan</button>
-  <button id="sweepBtn" onclick="toggleAuto('sweep')">Sweep 360°</button>
+  <b>Turret Controls</b><br>
+  <button onclick="fetch(CAM+'/yawLeft')">Yaw L</button>
+  <button onclick="fetch(CAM+'/yawRight')">Yaw R</button>
+  <button onclick="fetch(CAM+'/yawStop')">Yaw Stop</button><br>
+  <button onclick="fetch(CAM+'/pitchUp')">Pitch Up</button>
+  <button onclick="fetch(CAM+'/pitchDown')">Pitch Down</button>
+  <button onclick="fetch(CAM+'/pitchStop')">Pitch Stop</button><br><br>
+  <button id="autoCamBtn" onclick="fetch(CAM+'/autoCam').then(()=>flashBtn('autoCamBtn'))">Auto Scan</button>
+  <button id="sweepBtn" onclick="fetch(CAM+'/autoCam').then(()=>flashBtn('sweepBtn'))">Sweep</button>
 </div>
 
-<div class="field" style="min-width:300px;">
-  <b>Battery / Sensor Info:</b>
+<div class="field" style="min-width:320px;">
+  <b>Battery / Sensor Info</b>
   <div id="battery" class="infoLine">Battery: -- V (--%)</div>
   <div id="mine" class="infoLine">Mine: --</div>
   <div id="gps" class="infoLine">GPS: --</div>
@@ -90,64 +67,150 @@ button.active {
 </div>
 
 <script>
-// ---------------- Live Rover Info ----------------
-async function updateStatus(){
-  try {
-    const res = await fetch('/status');
-    const data = await res.json();
-    document.getElementById('battery').innerText =
-      "Battery: " + data.battery + " V (" + data.percent + "%)";
-    document.getElementById('mine').innerText =
-      "Mine: " + (data.mineDetected ? "⚠️ Detected" : "None");
-    document.getElementById('gps').innerText =
-      "GPS: " + data.gps;
-    document.getElementById('distance').innerText =
-      "Distance: " + data.distance + " cm";
-  } catch(e) {
-    console.log("Status update failed");
-  }
+/* ---------- CONFIG ---------- */
+const ROVER = 'http://192.168.4.1';
+const CAM   = 'http://192.168.4.2';
+const CAMERA_WIDTH = 480;
+const CAMERA_HEIGHT = 360;
+const BLACK_THRESHOLD = 80;  // adjustable brightness threshold
+
+/* ---------- BUTTON VISUAL FEEDBACK ---------- */
+function flashBtn(id){
+  const b = document.getElementById(id);
+  if(!b) return;
+  b.classList.add('active');
+  setTimeout(()=>b.classList.remove('active'),600);
 }
-setInterval(updateStatus, 1000);
+
+/* ---------- LIVE STATUS ---------- */
+async function updateStatus(){
+  try{
+    const r = await fetch(ROVER+'/status',{cache:'no-store'});
+    if(!r.ok) throw 'no status';
+    const j = await r.json();
+    document.getElementById('battery').innerText=`Battery: ${j.battery.toFixed(2)} V (${j.percent}%)`;
+    document.getElementById('mine').innerText=`Mine: ${j.mine}`;
+    document.getElementById('gps').innerText=`GPS: ${j.gps}`;
+    document.getElementById('distance').innerText=`Distance: ${j.distance>=0?j.distance:'n/a'} cm`;
+  }catch(e){}
+}
+setInterval(updateStatus,1000);
 updateStatus();
 
-// ---------------- Auto button toggle ----------------
-function toggleAuto(type){
-  fetch('/'+type).then(()=>updateBtn(type));
-}
-function updateBtn(type){
-  fetch('/'+type+'Status').then(r=>r.text()).then(t=>{
-    let btn = document.getElementById(
-      type=='auto'?'autoDriveBtn':type=='autoCam'?'autoCamBtn':'sweepBtn'
-    );
-    if(t=='ON'){ btn.classList.add('active'); }
-    else{ btn.classList.remove('active'); }
-  });
-}
-setInterval(()=>{updateBtn('auto');updateBtn('autoCam');updateBtn('sweep');},1000);
+/* ---------- VIDEO + MODEL ---------- */
+const img=document.getElementById('camImg');
+const overlay=document.getElementById('overlay');
+const ctx=overlay.getContext('2d');
+overlay.width=CAMERA_WIDTH;overlay.height=CAMERA_HEIGHT;
 
-// ---------------- Camera Stream ----------------
-const video = document.getElementById('camFeed');
-video.src = 'http://192.168.4.2:81/stream'; // <-- your ESP-CAM IP and port
+let model=null;
+let detecting=false;
+let autoTracking=true;
+let lastYawCmd=null,lastPitchCmd=null,lastCmdTime=0;
+const CMD_MIN_INTERVAL=200;
 
-// ---------------- TensorFlow.js + COCO-SSD ----------------
-let model;
-cocoSsd.load().then(m=>{
-  model = m;
-  console.log("Model loaded");
-  detect();
+document.getElementById('autoTrackToggle').addEventListener('change',e=>{
+  autoTracking=e.target.checked;
 });
 
-async function detect(){
-  if(model){
-    const predictions = await model.detect(video);
-    predictions.forEach(p=>{
-      if(p.class === 'person'){
-        console.log('Person detected:', p);
-      }
-    });
+function isMostlyBlack(imageData){
+  const d=imageData.data;let sum=0,cnt=0;
+  for(let i=0;i<d.length;i+=4){
+    const brightness=(d[i]+d[i+1]+d[i+2])/3;
+    sum+=brightness;cnt++;if(cnt>400)break;
   }
-  requestAnimationFrame(detect);
+  return (sum/cnt)<BLACK_THRESHOLD;
 }
+function sendYawCmd(cmd){
+  const now=Date.now();
+  if(cmd===lastYawCmd&&(now-lastCmdTime)<CMD_MIN_INTERVAL)return;
+  lastYawCmd=cmd;lastCmdTime=now;
+  if(cmd==='left')fetch(CAM+'/yawLeft');
+  else if(cmd==='right')fetch(CAM+'/yawRight');
+  else fetch(CAM+'/yawStop');
+}
+function sendPitchCmd(cmd){
+  const now=Date.now();
+  if(cmd===lastPitchCmd&&(now-lastCmdTime)<CMD_MIN_INTERVAL)return;
+  lastPitchCmd=cmd;lastCmdTime=now;
+  if(cmd==='up')fetch(CAM+'/pitchUp');
+  else if(cmd==='down')fetch(CAM+'/pitchDown');
+  else fetch(CAM+'/pitchStop');
+}
+
+async function runDetectionLoop(){
+  if(!model)return;
+  if(detecting)return;
+  detecting=true;
+  try{
+    ctx.drawImage(img,0,0,overlay.width,overlay.height);
+    const preds=await model.detect(overlay);
+    ctx.clearRect(0,0,overlay.width,overlay.height);
+    ctx.drawImage(img,0,0,overlay.width,overlay.height);
+
+    let best=null;
+    for(const p of preds){
+      if(p.class!=='person')continue;
+      const area=p.bbox[2]*p.bbox[3];
+      if(!best||area>best.area)best={pred:p,area};
+    }
+
+    for(const p of preds){
+      if(p.class!=='person')continue;
+      const [x,y,w,h]=p.bbox;
+      const sx=Math.max(0,Math.floor(x+w*0.25));
+      const sy=Math.max(0,Math.floor(y+h*0.25));
+      const sw=Math.min(Math.floor(w*0.5),overlay.width-sx);
+      const sh=Math.min(Math.floor(h*0.5),overlay.height-sy);
+      const data=ctx.getImageData(sx,sy,Math.max(1,sw),Math.max(1,sh));
+      const enemy=isMostlyBlack(data);
+      const isTracked=(best&&p===best.pred);
+      ctx.lineWidth=isTracked?4:2;
+      ctx.strokeStyle=enemy?'red':'lime';
+      ctx.fillStyle=enemy?'rgba(255,0,0,0.25)':'rgba(0,255,0,0.15)';
+      ctx.beginPath();
+      ctx.rect(x,y,w,h);
+      ctx.stroke();
+      if(isTracked)ctx.fillRect(x,y,w,h);
+      ctx.fillStyle=enemy?'red':'lime';
+      ctx.font='14px Arial';
+      const label=(enemy?'ENEMY ':'person ')+(p.score*100|0)+'%';
+      ctx.fillText(label,x+4,Math.max(16,y+16));
+    }
+
+    if(autoTracking&&best){
+      const [x,y,w,h]=best.pred.bbox;
+      const cx=x+w/2,cy=y+h/2;
+      ctx.strokeStyle='yellow';ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.moveTo(cx-10,cy);ctx.lineTo(cx+10,cy);
+      ctx.moveTo(cx,cy-10);ctx.lineTo(cx,cy+10);
+      ctx.stroke();
+
+      const dx=(cx-overlay.width/2)/overlay.width;
+      const dy=(cy-overlay.height/2)/overlay.height;
+      const deadX=0.08,deadY=0.12;
+      if(dx<-deadX)sendYawCmd('left');
+      else if(dx>deadX)sendYawCmd('right');
+      else sendYawCmd('stop');
+      if(dy>deadY)sendPitchCmd('up');
+      else if(dy<-deadY)sendPitchCmd('down');
+      else sendPitchCmd('stop');
+    }else{
+      sendYawCmd('stop');sendPitchCmd('stop');
+    }
+  }catch(e){console.error(e);}
+  detecting=false;
+  requestAnimationFrame(runDetectionLoop);
+}
+
+(async function init(){
+  try{
+    model=await cocoSsd.load();
+    console.log('COCO-SSD loaded');
+    setTimeout(()=>runDetectionLoop(),700);
+  }catch(e){console.error('Model load failed',e);}
+})();
 </script>
 </body>
 </html>
