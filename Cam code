@@ -1,28 +1,32 @@
 /* ============================================================
-   ESP32-CAM Turret Control – Full Version
-   Features:
-     - Video streaming
-     - Manual yaw/pitch control
-     - Auto scanning
-     - Compatible with Rover ESP page
+   ESP32-CAM streaming + turret control
+   CAM static IP: 192.168.4.2 (on Rover_AP)
    ============================================================ */
 
 #include "esp_camera.h"
 #include <WiFi.h>
-#include <ESP32Servo.h>
 #include <WebServer.h>
+#include <ESP32Servo.h>
+#include "esp_timer.h"
+#include "img_converters.h"
+#include "fb_gfx.h"
+#include "fd_forward.h"
 
-// ---------------- WiFi -----------------
-const char* ssid = "Rover_AP";       // Connect to Rover ESP AP
+// ---------- WiFi (connect to Rover AP) ----------
+const char* ssid = "Rover_AP";
 const char* password = "12345678";
 
-// ---------------- Camera -----------------
+// static IP for cam on Rover AP
+IPAddress static_ip(192,168,4,2);
+IPAddress gateway(192,168,4,1);
+IPAddress subnet(255,255,255,0);
+
+// ---------- Camera pins for AI-Thinker (most modules) ----------
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
 #define SIOD_GPIO_NUM     26
 #define SIOC_GPIO_NUM     27
-
 #define Y9_GPIO_NUM       35
 #define Y8_GPIO_NUM       34
 #define Y7_GPIO_NUM       39
@@ -37,22 +41,21 @@ const char* password = "12345678";
 
 WebServer server(80);
 
-// ---------------- Servos -----------------
-Servo yawServo;   // Continuous rotation
-Servo pitchServo; // 0-90°
+// ---------- Servos ----------
+Servo yawServo;   // continuous
+Servo pitchServo; // 0-90
 
-#define YAW_PIN 13
-#define PITCH_PIN 12
+#define YAW_PIN 12   // adjust if needed
+#define PITCH_PIN 13 // adjust if needed
 
-bool autoScan = false;
-int pitchDir = 1; // 1 = up, -1 = down
-int pitchPos = 45; // start at mid
-int yawSpeed = 10; // degrees per step
-unsigned long lastMove = 0;
+bool autoCam = false;
+bool yawMoving = false;
+int pitchPos = 45; // initial
 
-// ---------------- Camera Setup -----------------
-void startCameraServer();
-void setupCamera(){
+// ---------- Camera server (MJPEG stream) ----------
+static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=frame";
+
+esp_err_t initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -74,123 +77,118 @@ void setupCamera(){
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_CIF;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+  return esp_camera_init(&config);
+}
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    while(true);
+void handleStream(){
+  WiFiClient client = server.client();
+  String response = String("HTTP/1.1 200 OK\r\n")
+    + "Content-Type: " + String(STREAM_CONTENT_TYPE) + "\r\n"
+    + "Access-Control-Allow-Origin: *\r\n\r\n";
+  server.sendContent(response);
+
+  while(true){
+    camera_fb_t * fb = esp_camera_fb_get();
+    if(!fb){ Serial.println("Camera capture failed"); return; }
+    String head = String("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ") + fb->len + "\r\n\r\n";
+    server.sendContent(head);
+    server.client().write(fb->buf, fb->len);
+    server.sendContent("\r\n");
+    esp_camera_fb_return(fb);
+    // break loop if client disconnected
+    if(!server.client().connected()) break;
+    delay(30); // ~30ms between frames
   }
 }
 
-// ---------------- Servo Helpers -----------------
-void moveYaw(int dir){
-  if(dir > 0) yawServo.write(180); // CW
-  else if(dir < 0) yawServo.write(0); // CCW
-  else yawServo.write(90); // stop
-}
+// ---------- Turret handlers ----------
+void handleYawLeft(){ yawServo.write(0); yawMoving=true; server.send(200,"text/plain","OK"); }
+void handleYawRight(){ yawServo.write(180); yawMoving=true; server.send(200,"text/plain","OK"); }
+void handleYawStop(){ yawServo.write(90); yawMoving=false; server.send(200,"text/plain","OK"); }
 
-void movePitch(int pos){
-  if(pos < 0) pos = 0;
-  if(pos > 90) pos = 90;
-  pitchServo.write(pos);
-}
+void handlePitchUp(){ pitchPos += 5; if(pitchPos>90) pitchPos=90; pitchServo.write(pitchPos); server.send(200,"text/plain","OK"); }
+void handlePitchDown(){ pitchPos -= 5; if(pitchPos<0) pitchPos=0; pitchServo.write(pitchPos); server.send(200,"text/plain","OK"); }
+void handlePitchStop(){ server.send(200,"text/plain","OK"); }
 
-// ---------------- Web Handlers -----------------
-void handleRoot(){
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-button{width:80px;height:50px;margin:3px;font-size:16px;}
-#autoBtn{background-color:#ccc;}
-</style>
-</head>
-<body>
-<h2>ESP32 Cam Turret</h2>
-<img src="/stream" width="320" /><br>
+void handleAutoCamToggle(){ autoCam = !autoCam; server.send(200,"text/plain", autoCam?"ON":"OFF"); }
+void handleAutoCamStatus(){ server.send(200,"text/plain", autoCam?"ON":"OFF"); }
 
-<button onclick="fetch('/yawLeft')">Yaw Left</button>
-<button onclick="fetch('/yawRight')">Yaw Right</button>
-<button onclick="fetch('/yawStop')">Yaw Stop</button><br>
+// minimal root
+void handleRootCam(){ server.send(200,"text/html","ESP32-CAM turret ready"); }
 
-<button onclick="fetch('/pitchUp')">Pitch Up</button>
-<button onclick="fetch('/pitchDown')">Pitch Down</button>
-<button onclick="fetch('/pitchStop')">Pitch Stop</button><br>
-
-<button id="autoBtn" onclick="fetch('/auto').then(()=>updateBtn())">Auto Scan</button>
-
-<script>
-function updateBtn(){
-  fetch('/autoStatus').then(r=>r.text()).then(t=>{
-    document.getElementById('autoBtn').style.backgroundColor = t=='ON'?'green':'#ccc';
-  });
-}
-setInterval(updateBtn,500);
-</script>
-
-</body>
-</html>
-)rawliteral";
-
-  server.send(200,"text/html",html);
-}
-
-void handleYawLeft(){ moveYaw(-1); server.send(200,"text/plain","OK"); }
-void handleYawRight(){ moveYaw(1); server.send(200,"text/plain","OK"); }
-void handleYawStop(){ moveYaw(0); server.send(200,"text/plain","OK"); }
-
-void handlePitchUp(){ pitchDir = 1; server.send(200,"text/plain","OK"); }
-void handlePitchDown(){ pitchDir = -1; server.send(200,"text/plain","OK"); }
-void handlePitchStop(){ pitchDir = 0; server.send(200,"text/plain","OK"); }
-
-void handleAuto(){ autoScan = !autoScan; server.send(200,"text/plain","OK"); }
-void handleAutoStatus(){ server.send(200,"text/plain",autoScan?"ON":"OFF"); }
-
-// ---------------- Setup -----------------
-void setup() {
+// ---------- setup & loop ----------
+void setup(){
   Serial.begin(115200);
-  WiFi.begin(ssid,password);
-  while(WiFi.status()!=WL_CONNECTED){delay(500);Serial.print(".");}
-  Serial.println("\nConnected to Rover ESP WiFi");
-  
-  setupCamera();
+  // configure STA with static IP to connect to Rover AP
+  WiFi.config(static_ip, gateway, subnet);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to Rover AP");
+  int tries=0;
+  while(WiFi.status()!=WL_CONNECTED && tries<40){
+    delay(250); Serial.print(".");
+    tries++;
+  }
+  if(WiFi.status()==WL_CONNECTED) {
+    Serial.println("\nCAM IP: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\nFailed to connect to AP - will still start server on default STA IP");
+  }
 
+  // init camera
+  if(initCamera() != ESP_OK){
+    Serial.println("Camera init failed");
+    while(true);
+  }
+
+  // servos
   yawServo.attach(YAW_PIN);
   pitchServo.attach(PITCH_PIN);
-  pitchServo.write(pitchPos);
   yawServo.write(90); // stop
+  pitchServo.write(pitchPos);
 
-  server.on("/", handleRoot);
+  // server routes
+  server.on("/", handleRootCam);
+  server.on("/stream", HTTP_GET, handleStream);
   server.on("/yawLeft", handleYawLeft);
   server.on("/yawRight", handleYawRight);
   server.on("/yawStop", handleYawStop);
   server.on("/pitchUp", handlePitchUp);
   server.on("/pitchDown", handlePitchDown);
   server.on("/pitchStop", handlePitchStop);
-  server.on("/auto", handleAuto);
-  server.on("/autoStatus", handleAutoStatus);
-  server.on("/stream", HTTP_GET, [](){ server.send(200,"text/plain","stream endpoint handled by camera"); });
+  server.on("/autoCam", handleAutoCamToggle);
+  server.on("/autoCamStatus", handleAutoCamStatus);
 
   server.begin();
-  Serial.println("Server started");
+  Serial.println("CAM server started");
 }
 
-// ---------------- Loop -----------------
-void loop() {
+unsigned long lastAutoMove = 0;
+int autoYawDir = 1;
+void loop(){
   server.handleClient();
 
-  // Auto scanning
-  if(autoScan && millis()-lastMove>200){
-    lastMove = millis();
-    yawServo.write(180); // slowly CW
-    pitchPos += pitchDir*2;
-    if(pitchPos>=60) pitchDir=-1;
-    if(pitchPos<=0) pitchDir=1;
+  // auto scan logic
+  if(autoCam && millis()-lastAutoMove > 150){
+    lastAutoMove = millis();
+    // simple slow rotation: toggle yaw servo briefly
+    if(autoYawDir>0) { yawServo.write(0); }
+    else { yawServo.write(180); }
+    // small pitch oscillation
+    pitchPos += (autoYawDir)*3;
+    if(pitchPos > 60){ pitchPos = 60; autoYawDir = -1; }
+    if(pitchPos < 0){ pitchPos = 0; autoYawDir = 1; }
     pitchServo.write(pitchPos);
+    // stop yaw after brief movement to simulate slow continuous
+    delay(80);
+    yawServo.write(90);
   }
 }
