@@ -1,5 +1,5 @@
 /* ============================================================
-   ESP32 Rover — Full corrected (static AP + /status JSON)
+   ESP32 Rover — Fixed concatenation for /status JSON
    Keeps motor pins, servo, ultrasonic and GPS unchanged.
    Rover AP IP: 192.168.4.1
    ============================================================ */
@@ -67,7 +67,7 @@ TinyGPSPlus gps;
 bool autoMode = false;
 bool bootOpen = false;
 String mineLog = "";
-long lastMineTime = 0;
+unsigned long lastMineTime = 0;
 
 // =====================================================
 // Helpers
@@ -190,21 +190,26 @@ void handleStatus() {
   int pct = batteryPercent(v);
   long dist = readDistance();
   String gpsStr = "NO FIX";
-  if (gps.location.isValid()) gpsStr = String(gps.location.lat(),6) + "," + String(gps.location.lng(),6);
+  if (gps.location.isValid()) {
+    gpsStr = String(gps.location.lat(),6) + "," + String(gps.location.lng(),6);
+  }
 
   // mine detection simple check
   bool mineDetected = (digitalRead(DET1)==HIGH || digitalRead(DET2)==HIGH || digitalRead(DET3)==HIGH);
   if (mineDetected && millis() - lastMineTime > 5000) {
     lastMineTime = millis();
-    mineLog += "Mine@" + gpsStr + "<br>";
+    String loc = gpsStr;
+    mineLog += "Mine@" + loc + "<br>";
   }
 
-  String json = "{";
-  json += "\"battery\":" + String(v,2);
+  // Build JSON using String and += to avoid literal+literal issues
+  String json = "";
+  json += "{";
+  json += "\"battery\":" + String(v, 2);
   json += ",\"percent\":" + String(pct);
   json += ",\"distance\":" + String(dist);
   json += ",\"gps\":\"" + gpsStr + "\"";
-  json += ",\"mine\":\"" + (mineDetected ? "Detected" : "None") + "\"";
+  json += ",\"mine\":\"" + String(mineDetected ? "Detected" : "None") + "\"";
   json += ",\"mineLog\":\"" + mineLog + "\"";
   json += ",\"auto\":" + String(autoMode ? "true" : "false");
   json += "}";
