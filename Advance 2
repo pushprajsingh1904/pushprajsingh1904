@@ -1,5 +1,7 @@
 /* ============================================================
-   ESP32 38-Pin Rover – Full Corrected Version with Live Telemetry
+   ESP32 Rover — Full corrected (static AP + /status JSON)
+   Keeps motor pins, servo, ultrasonic and GPS unchanged.
+   Rover AP IP: 192.168.4.1
    ============================================================ */
 
 #include <WiFi.h>
@@ -8,12 +10,17 @@
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
 
-// ---------------- WIFI -----------------
+// ---------------- WIFI (AP mode with static IP) -----------------
 const char* ssid = "Rover_AP";
 const char* password = "12345678";
+IPAddress local_ip(192,168,4,1);
+IPAddress gateway(192,168,4,1);
+IPAddress subnet(255,255,255,0);
+
+// Web server
 WebServer server(80);
 
-// -------------- MOTOR PINS -------------------
+// -------------- MOTOR PINS (unchanged) -------------------
 #define M1A 4
 #define M1B 5
 #define M1C 16
@@ -31,7 +38,7 @@ WebServer server(80);
 #define M4C 12
 #define M4D 15
 
-// -------------- SERVO -------------------------
+// -------------- BOOT SERVO -------------------------
 Servo bootServo;
 #define SERVO_PIN 13
 
@@ -42,3 +49,226 @@ Servo bootServo;
 // -------------- BATTERY SENSOR ---------------
 #define BATTERY_PIN 35
 #define V_DIV_RATIO 10.0
+#define BATTERY_FULL 12.6
+#define BATTERY_EMPTY 10.5
+
+// -------------- METAL DETECTORS --------------
+#define DET1 36
+#define DET2 38
+#define DET3 39
+
+// -------------- GPS --------------------------
+HardwareSerial gpsSerial(1);
+#define GPS_RX 4
+#define GPS_BAUD 9600
+TinyGPSPlus gps;
+
+// -------------- STATE --------------------
+bool autoMode = false;
+bool bootOpen = false;
+String mineLog = "";
+long lastMineTime = 0;
+
+// =====================================================
+// Helpers
+// =====================================================
+float readBattery() {
+  int adc = analogRead(BATTERY_PIN);
+  float v = (adc / 4095.0) * 3.3 * V_DIV_RATIO;
+  return v;
+}
+
+int batteryPercent(float v) {
+  if (v >= BATTERY_FULL) return 100;
+  if (v <= BATTERY_EMPTY) return 0;
+  return (int)((v - BATTERY_EMPTY) / (BATTERY_FULL - BATTERY_EMPTY) * 100);
+}
+
+long readDistance() {
+  // trigger
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30 ms timeout
+  if (duration == 0) return -1; // no reading
+  long dist_cm = duration * 0.034 / 2;
+  return dist_cm;
+}
+
+// Motor controls (unchanged)
+void stopAll() {
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i=0;i<16;i++) digitalWrite(motors[i], LOW);
+}
+void forward() {
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
+}
+void back() {
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
+}
+void left() {
+  digitalWrite(M1A,LOW); digitalWrite(M1B,HIGH);
+  digitalWrite(M1C,LOW); digitalWrite(M1D,HIGH);
+  digitalWrite(M2A,HIGH); digitalWrite(M2B,LOW);
+  digitalWrite(M2C,HIGH); digitalWrite(M2D,LOW);
+  digitalWrite(M3A,LOW); digitalWrite(M3B,HIGH);
+  digitalWrite(M3C,LOW); digitalWrite(M3D,HIGH);
+  digitalWrite(M4A,HIGH); digitalWrite(M4B,LOW);
+  digitalWrite(M4C,HIGH); digitalWrite(M4D,LOW);
+}
+void right() {
+  digitalWrite(M1A,HIGH); digitalWrite(M1B,LOW);
+  digitalWrite(M1C,HIGH); digitalWrite(M1D,LOW);
+  digitalWrite(M2A,LOW); digitalWrite(M2B,HIGH);
+  digitalWrite(M2C,LOW); digitalWrite(M2D,HIGH);
+  digitalWrite(M3A,HIGH); digitalWrite(M3B,LOW);
+  digitalWrite(M3C,HIGH); digitalWrite(M3D,LOW);
+  digitalWrite(M4A,LOW); digitalWrite(M4B,HIGH);
+  digitalWrite(M4C,LOW); digitalWrite(M4D,HIGH);
+}
+
+// =====================================================
+// HTTP Handlers
+// =====================================================
+
+void handleRoot() {
+  // minimal page so typing http://192.168.4.1/ shows something
+  String s = "<html><body><h3>Rover ESP</h3><p>Use the dedicated rover.html or hit /status for JSON.</p></body></html>";
+  server.send(200, "text/html", s);
+}
+
+void handleFwd(){ forward(); server.send(200,"text/plain","OK"); }
+void handleBack(){ back(); server.send(200,"text/plain","OK"); }
+void handleLeft(){ left(); server.send(200,"text/plain","OK"); }
+void handleRight(){ right(); server.send(200,"text/plain","OK"); }
+void handleStop(){ stopAll(); server.send(200,"text/plain","OK"); }
+
+void handleMove() {
+  // compatibility: /move?dir=forward
+  if (server.hasArg("dir")) {
+    String d = server.arg("dir");
+    if (d=="forward") forward();
+    else if (d=="backward" || d=="back") back();
+    else if (d=="left") left();
+    else if (d=="right") right();
+    else if (d=="stop") stopAll();
+  }
+  server.send(200,"text/plain","OK");
+}
+
+void handleBoot() {
+  bootOpen = !bootOpen;
+  if (bootOpen) bootServo.write(0); else bootServo.write(90);
+  server.send(200,"text/plain", bootOpen ? "Boot Open" : "Boot Closed");
+}
+
+void handleAutoToggle() {
+  autoMode = !autoMode;
+  server.send(200,"text/plain", autoMode ? "AUTO ON" : "AUTO OFF");
+}
+void handleAutoStatus() {
+  server.send(200,"text/plain", autoMode ? "ON" : "OFF");
+}
+
+// STATUS JSON endpoint expected by the HTML
+void handleStatus() {
+  float v = readBattery();
+  int pct = batteryPercent(v);
+  long dist = readDistance();
+  String gpsStr = "NO FIX";
+  if (gps.location.isValid()) gpsStr = String(gps.location.lat(),6) + "," + String(gps.location.lng(),6);
+
+  // mine detection simple check
+  bool mineDetected = (digitalRead(DET1)==HIGH || digitalRead(DET2)==HIGH || digitalRead(DET3)==HIGH);
+  if (mineDetected && millis() - lastMineTime > 5000) {
+    lastMineTime = millis();
+    mineLog += "Mine@" + gpsStr + "<br>";
+  }
+
+  String json = "{";
+  json += "\"battery\":" + String(v,2);
+  json += ",\"percent\":" + String(pct);
+  json += ",\"distance\":" + String(dist);
+  json += ",\"gps\":\"" + gpsStr + "\"";
+  json += ",\"mine\":\"" + (mineDetected ? "Detected" : "None") + "\"";
+  json += ",\"mineLog\":\"" + mineLog + "\"";
+  json += ",\"auto\":" + String(autoMode ? "true" : "false");
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+
+  // configure AP with static IP
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+  WiFi.softAP(ssid, password);
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // setup pins
+  int motors[] = {M1A,M1B,M1C,M1D,M2A,M2B,M2C,M2D,M3A,M3B,M3C,M3D,M4A,M4B,M4C,M4D};
+  for (int i=0;i<16;i++) pinMode(motors[i], OUTPUT);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(DET1, INPUT);
+  pinMode(DET2, INPUT);
+  pinMode(DET3, INPUT);
+
+  bootServo.attach(SERVO_PIN);
+  bootServo.write(90); // closed
+
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, -1);
+
+  // server handlers
+  server.on("/", handleRoot);
+  server.on("/fwd", handleFwd);
+  server.on("/back", handleBack);
+  server.on("/left", handleLeft);
+  server.on("/right", handleRight);
+  server.on("/stop", handleStop);
+  server.on("/move", handleMove);
+  server.on("/boot", handleBoot);
+  server.on("/auto", handleAutoToggle);
+  server.on("/autoStatus", handleAutoStatus);
+  server.on("/status", handleStatus);
+
+  server.begin();
+  stopAll();
+  Serial.println("Rover ready");
+}
+
+void loop() {
+  server.handleClient();
+  while (gpsSerial.available()) gps.encode(gpsSerial.read());
+
+  // Auto driving behavior unchanged
+  if (autoMode) {
+    long d = readDistance();
+    if (d > 0 && d < 15) { stopAll(); delay(300); right(); delay(700); stopAll(); }
+    else { forward(); delay(2000); stopAll(); }
+
+    if (digitalRead(DET1)==HIGH || digitalRead(DET2)==HIGH || digitalRead(DET3)==HIGH) {
+      stopAll();
+      String loc = gps.location.isValid() ? String(gps.location.lat(),6)+","+String(gps.location.lng(),6) : "No GPS";
+      mineLog += "Mine!" + loc + "<br>";
+      delay(500);
+    }
+  }
+}
